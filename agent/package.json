@@ -1,0 +1,21 @@
+{
+  "name": "xlwc-agent",
+  "version": "1.0.0",
+  "description": "XLayer World Cup 2026 AI Agent",
+  "scripts": {
+    "eliminate": "ts-node agent.ts eliminate",
+    "champion": "ts-node agent.ts champion",
+    "leaderboard": "ts-node agent.ts leaderboard",
+    "finalize": "ts-node agent.ts finalize",
+    "monitor": "ts-node agent.ts monitor"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "ethers": "^6.13.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5",
+    "@types/node": "^20.12.7"
+  }
+}

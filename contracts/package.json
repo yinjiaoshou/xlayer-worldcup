@@ -1,0 +1,23 @@
+{
+  "name": "xlayer-worldcup-contracts",
+  "version": "1.0.0",
+  "description": "XLayer World Cup DeFi contracts",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network xlayer_testnet",
+    "deploy:mainnet": "hardhat run scripts/deploy.ts --network xlayer_mainnet",
+    "verify": "hardhat verify"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "hardhat": "^2.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0",
+    "dotenv": "^16.6.1"
+  }
+}

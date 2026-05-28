@@ -1,0 +1,21 @@
+# Environment — NEVER commit private keys
+.env
+.env.local
+
+# Hardhat
+cache/
+artifacts/
+typechain-types/
+
+# Deployments (optional — you may want to track deployments.json)
+# deployments.json
+
+# Dependencies
+node_modules/
+
+# Coverage
+coverage/
+coverage.json
+
+# macOS
+.DS_Store
