@@ -6,6 +6,7 @@ import { ACTIVE_CHAIN_ID, XLWC_BUY_URL } from "../config/network";
 import { TEAMS } from "../data/teams";
 import { useLang } from "../contexts/LanguageContext";
 import type { Translations } from "../i18n";
+import AgentStakePanel from "../components/AgentStakePanel";
 
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 const PREDICTOR_ABI = [
@@ -935,6 +936,9 @@ export default function Predict() {
           </div>
         ))}
       </div>
+
+      {/* AI Agent staking entry — always visible */}
+      <AgentStakePanel />
 
       {/* Round list */}
       <div className="space-y-4">

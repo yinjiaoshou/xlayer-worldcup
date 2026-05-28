@@ -10,6 +10,7 @@ import { useAllTeams, OnChainTeam } from "../hooks/useChainData";
 import { CONTRACTS } from "../config/contracts";
 import { ACTIVE_CHAIN_ID, XLWC_BUY_URL } from "../config/network";
 import { useLang } from "../contexts/LanguageContext";
+import AgentStakePanel from "../components/AgentStakePanel";
 
 // Mini-ABI for predict round preview
 const PRED_HOME_ABI = [
@@ -315,6 +316,11 @@ export default function Home() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* ── AI Agent Follow ─────────────────────────────────────────────────── */}
+      <section className="max-w-7xl mx-auto px-4 sm:px-6 pb-6">
+        <AgentStakePanel />
       </section>
 
       {/* ── Flywheel mechanism ──────────────────────────────────────────────── */}
