@@ -14,6 +14,7 @@ const zh = {
     navBracket: "赛程",
     navFantasy: "梦幻阵容",
     navPredict: "串关竞猜",
+    navAgent: "🤖 AI跟单",
     connectWallet: "连接钱包",
     wrongNetwork: "当前网络不是 X Layer 主网，合约调用将会失败",
     switchNetwork: "切换到 X Layer",
@@ -62,6 +63,7 @@ const zh = {
     ctaPredict: "🎯 参与串关竞猜",
     ctaBuyXLWC: "🚀 购买 XLWC",
     ctaAllTeams: "查看 48 支球队 →",
+    ctaAgent: "🤖 AI 跟单",
 
     // Live round banner
     roundOpen: "🎯 竞猜开放中",
@@ -365,6 +367,7 @@ const en = {
     navBracket: "Schedule",
     navFantasy: "Fantasy",
     navPredict: "Parlay",
+    navAgent: "🤖 AI Follow",
     connectWallet: "Connect Wallet",
     wrongNetwork: "Not on X Layer Mainnet — contract calls will fail",
     switchNetwork: "Switch to X Layer",
@@ -410,6 +413,7 @@ const en = {
     ctaPredict: "🎯 Play Parlay",
     ctaBuyXLWC: "🚀 Buy XLWC",
     ctaAllTeams: "View all 48 teams →",
+    ctaAgent: "🤖 AI Follow",
 
     roundOpen: "🎯 Predictions Open",
     roundLocked: "🔒 Awaiting Results",

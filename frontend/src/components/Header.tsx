@@ -78,6 +78,14 @@ export default function Header() {
               }`}>
               🎯 {t.header.navPredict}
             </NavLink>
+            <NavLink to="/predict" className={({ isActive }) =>
+              `text-sm font-bold transition-colors px-3 py-1.5 rounded-lg border ${
+                isActive
+                  ? "bg-violet-500/30 border-violet-400/50 text-violet-300"
+                  : "bg-violet-500/15 border-violet-500/30 text-violet-400 hover:bg-violet-500/25"
+              }`}>
+              {t.header.navAgent}
+            </NavLink>
           </nav>
 
           {/* Right side */}
@@ -128,6 +136,11 @@ export default function Header() {
             <NavLink to="/predict"    className={({ isActive }) =>
               `text-sm font-semibold transition-colors ${isActive ? "text-amber-400" : "text-white/60 hover:text-white"}`
             } onClick={() => setMobileOpen(false)}>🎯 {t.header.navPredict}</NavLink>
+            <NavLink to="/predict" className={({ isActive }) =>
+              `text-sm font-bold transition-colors px-3 py-1.5 rounded-lg border inline-block w-fit ${
+                isActive ? "bg-violet-500/30 border-violet-400/50 text-violet-300" : "bg-violet-500/15 border-violet-500/30 text-violet-400"
+              }`
+            } onClick={() => setMobileOpen(false)}>{t.header.navAgent}</NavLink>
             {/* Mobile language toggle */}
             <button
               onClick={() => { toggle(); setMobileOpen(false); }}

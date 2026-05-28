@@ -202,6 +202,12 @@ export default function Home() {
               <Link to="/teams" className="text-white/50 hover:text-white text-sm font-semibold py-2.5 px-2 transition-colors">
                 {t.home.ctaAllTeams}
               </Link>
+              <Link
+                to="/predict"
+                className="inline-flex items-center gap-1.5 bg-violet-500/15 border border-violet-500/30 text-violet-400 hover:bg-violet-500/25 text-sm font-bold py-2.5 px-4 rounded-xl transition-colors"
+              >
+                {t.home.ctaAgent}
+              </Link>
             </div>
           </div>
 
