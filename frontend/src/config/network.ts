@@ -29,4 +29,4 @@ export const OKX_CHAIN_ID: number = 196;
  * Used in multiple "Buy XLWC" CTAs across the app.
  */
 export const XLWC_BUY_URL =
-  "https://flap.sh/token/0xbc025cef3e0b7e85cf8b33f775fdc84ec93d7777";
+  "https://flap.sh/xlayer/0xbc025cef3e0b7e85cf8b33f775fdc84ec93d7777";
