@@ -28,6 +28,7 @@ const PREDICTOR_ABI = [
       { name: "prizePool",    type: "uint256" }, { name: "rollover",     type: "uint256" },
       { name: "status",       type: "uint8"   }, { name: "matchCount",   type: "uint8"   },
       { name: "totalWinners", type: "uint256" }, { name: "totalWeight",  type: "uint256" },
+      { name: "claimedCount", type: "uint256" },                                            // v7
     ] }] },
   { name: "getMatches",      type: "function", stateMutability: "view",
     inputs: [{ name: "roundId", type: "uint256" }],
@@ -66,7 +67,7 @@ const PREDICTOR_ABI = [
     inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { name: "insurancePool",   type: "function", stateMutability: "view",
     inputs: [], outputs: [{ name: "", type: "uint256" }] },
-  // v6: staking gate
+  // v7: staking gate
   { name: "stakeForAgent",   type: "function", stateMutability: "nonpayable",
     inputs: [{ name: "amount", type: "uint256" }], outputs: [] },
   { name: "unstakeFromAgent", type: "function", stateMutability: "nonpayable",

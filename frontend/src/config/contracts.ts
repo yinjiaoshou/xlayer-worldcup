@@ -1,5 +1,5 @@
 // ─── Contract addresses ───────────────────────────────────────────────────────
-// XLayer Mainnet (chainId 196) — deployed 2026-05-25
+// XLayer Mainnet (chainId 196) — v7 deployed 2026-05-28
 // Deployer: 0x2C951158B7A4c46Bc0DE3160CAbFae1AAe0733e0
 // DEX: PotatoSwap V2 (0x881fB2f98c13d521009464e7D1CBf16E1b394e8E)
 export const CONTRACTS = {
@@ -10,7 +10,7 @@ export const CONTRACTS = {
   ButterflyVault:   "0x1EcE2432F887425B267781d8DDA037269529C92B" as `0x${string}`,
   TeamTokenFactory: "0x8a3aa019bAb59C1E4f9Cd5C7d14b14098dBE422e" as `0x${string}`,
   FantasyLeague:    "0x42E7188475Aa4EBa5C32644E385F9Bca08036397" as `0x${string}`, // 梦幻阵容竞技
-  MatchPredictor:   "0x28CFE99d248d40009Cdc239DFDa232390d8a06D2" as `0x${string}`, // 串关竞猜 v6 (agent staking gate)
+  MatchPredictor:   "0x9324F8b611A3aB4d47eD11289dce8C574cE8B96B" as `0x${string}`, // 串关竞猜 v7 (actuarial security fixes)
 };
 
 // ─── ABIs ─────────────────────────────────────────────────────────────────────

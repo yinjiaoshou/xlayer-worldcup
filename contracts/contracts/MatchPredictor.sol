@@ -6,7 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title  MatchPredictor — 串关竞猜 v6 (Agent Staking)
+/// @title  MatchPredictor — 串关竞猜 v7 (Agent Staking + Actuarial Security)
 /// @notice Each "round" bundles 3-5 World Cup matches.
 ///         Players pay XLWC and predict ALL match outcomes in the round.
 ///         Supports 3 outcomes per match: teamA wins / draw / teamB wins.
@@ -18,13 +18,29 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 ///           (both bits set is invalid)
 ///
 ///         Bonus system:
-///           爆冷加成 (Underdog boost ×2):  correct underdog pick on any match
+///           爆冷加成 (Underdog boost ×2 per upset, stacks):
+///             each correctly predicted underdog win → weight ×2 (multiplicative, all upsets counted)
 ///           持币加成 (Holder bonus +50%):  hold ≥ holderThreshold of a winning team token
+///           Hard cap: weight is capped at MAX_WEIGHT (30,000) after all multipliers
 ///
 ///         Agent staking:
 ///           质押门槛 (Stake gate):  stake ≥ agentStakeMin XLWC once → access followAndPredict
 ///           跟单赢   (Follow win):  additive +winBonus% of entryFee from insurancePool
 ///           跟单输   (Follow lose): partial refund refundBps% of entryFee from insurancePool
+///
+///         v7 security fixes vs v6:
+///           [CRITICAL] rolloverPrize: blocked while any winner of the source round has not
+///                      claimed — prevents owner from zeroing prizePool under live claimants.
+///           [CRITICAL] rolloverPrize: `remaining` is calculated net of ALL unclaimed prizes
+///                      across every settled round, preventing cross-round prize theft.
+///           [MEDIUM]   followAndPredict: refund pre-reserved from insurancePool at entry time —
+///                      guarantees every follower can always claim their refund if they lose.
+///           [MEDIUM]   Win bonus capped at available insurance (insurancePool minus all
+///                      reserved refunds), so bonuses never eat into reserved refund funds.
+///           [MEDIUM]   lockRound / predict / followAndPredict: require ≥ 3 matches
+///                      (consistent with the documented 3-5 match design).
+///           [LOW]      Underdog weight boost now stacks per upset (×2 per upset, no early break)
+///                      with a hard cap of MAX_WEIGHT = 30,000 to prevent dilution extremes.
 contract MatchPredictor is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -34,6 +50,9 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     uint8 public constant RESULT_DRAW    = 1;   // draw
     uint8 public constant RESULT_B       = 2;   // teamB wins
     uint8 public constant RESULT_PENDING = 255; // not yet settled
+
+    /// Hard cap on per-entry weight after all multipliers (base=10000, max=30000 = 3×)
+    uint256 public constant MAX_WEIGHT   = 30_000;
 
     // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -60,6 +79,7 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         uint8       matchCount;
         uint256     totalWinners;
         uint256     totalWeight;
+        uint256     claimedCount;  // winners who have claimed — rollover guard
     }
 
     struct UserPrediction {
@@ -82,6 +102,12 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     IERC20 public immutable xlwc;
     uint256 public holderThreshold = 100 ether;
 
+    /// @dev Running total of prize tokens currently owed to winners across all rounds.
+    ///      Incremented in _finalizeRound when winners > 0 (by prizePool + rollover).
+    ///      Decremented in claimPrize (by basePayout).
+    ///      Used by rolloverPrize to compute truly available balance.
+    uint256 public totalUnclaimedPrize;
+
     // ─── Agent mechanic ───────────────────────────────────────────────────────
     //
     //  STAKING GATE: Users must stake ≥ agentStakeMin XLWC to access followAndPredict.
@@ -95,6 +121,12 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     //    Expected drain per follower per round = p*B + (1-p)*R
     //                                          = 0.4*0.30 + 0.6*0.15 = 0.21
     //    Follower EV advantage vs self-pick     = +21% of entryFee  ← sustainable
+    //
+    //  INSURANCE RESERVATION: on followAndPredict, each follower's potential refund is
+    //  immediately reserved from the available insurance balance (insurancePool minus
+    //  totalReservedRefunds). This guarantees the refund is always payable at settlement.
+    //  Win bonuses are also capped to available = insurancePool - totalReservedRefunds,
+    //  so they can never eat into reserved refund funds.
 
     /// Minimum XLWC to stake for agent-follow access (default 500 XLWC)
     uint256 public agentStakeMin = 500 ether;
@@ -111,8 +143,15 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     /// Entry-fee refund for followers who LOSE: 15% back
     uint256 public agentFollowerRefundBps = 1_500; // bps, 1500/10000 = 15%
 
-    /// XLWC insurance pool (funded by owner via addInsurance)
+    /// XLWC insurance pool (gross deposits by owner via addInsurance)
     uint256 public insurancePool;
+
+    /// Sum of all per-follower reserved refunds not yet paid out or released.
+    /// Invariant: insurancePool >= totalReservedRefunds always.
+    uint256 public totalReservedRefunds;
+
+    /// Per-follower pre-reserved refund amount (locked at followAndPredict time)
+    mapping(uint256 => mapping(address => uint256)) public reservedRefund;
 
     uint256 public roundCount;
     mapping(uint256 => Round)                                public rounds;
@@ -208,7 +247,7 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
             id: roundId, name: name, entryFee: entryFee,
             predDeadline: predDeadline, prizePool: 0, rollover: 0,
             status: RoundStatus.Open, matchCount: 0,
-            totalWinners: 0, totalWeight: 0
+            totalWinners: 0, totalWeight: 0, claimedCount: 0
         });
         emit RoundCreated(roundId, name, entryFee, predDeadline);
     }
@@ -234,10 +273,12 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         emit MatchAdded(roundId, r.matchCount - 1, teamA, teamB, favoriteIsA);
     }
 
+    /// @notice Lock the round so no more predictions are accepted.
+    ///         Requires at least 3 matches (consistent with 3-5 match design).
     function lockRound(uint256 roundId) external onlyOwner {
         Round storage r = rounds[roundId];
         require(r.status == RoundStatus.Open, "not open");
-        require(r.matchCount >= 2,            "need at least 2 matches");
+        require(r.matchCount >= 3,            "need at least 3 matches");
         r.status = RoundStatus.Locked;
         emit RoundLocked(roundId);
     }
@@ -282,22 +323,25 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
             }
             if (!allCorrect) continue;
 
-            // Base weight = 10000 (= 1.0×)
+            // Base weight = 10,000 (= 1.0×)
             uint256 weight = 10_000;
 
-            // 爆冷加成: any correct underdog pick → ×2
+            // 爆冷加成: each correct underdog pick → ×2 (stacks per upset, no early break)
             for (uint8 i; i < r.matchCount; i++) {
                 uint8 predicted = _decodePrediction(pred, i);
                 if (predicted == RESULT_DRAW) continue;
                 bool pickedUnderdog = (predicted == RESULT_A && !matches[i].favoriteIsA) ||
                                      (predicted == RESULT_B &&  matches[i].favoriteIsA);
-                if (pickedUnderdog) { weight = weight * 2; break; }
+                if (pickedUnderdog) weight = weight * 2; // ← all upsets stack (no break)
             }
 
             // 持币加成: hold ≥ threshold of any winning team token → +50%
             if (_holdsWinningTeam(player, roundId)) {
                 weight = weight * 15_000 / 10_000;
             }
+
+            // Hard cap — prevents extreme dilution from combined bonuses
+            if (weight > MAX_WEIGHT) weight = MAX_WEIGHT;
 
             pred.winWeight = weight;
             totalWeight   += weight;
@@ -306,6 +350,12 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
         r.totalWinners = winners;
         r.totalWeight  = totalWeight;
+
+        // Track total owed to winners so rolloverPrize cannot steal outstanding claims
+        if (winners > 0) {
+            totalUnclaimedPrize += r.prizePool + r.rollover;
+        }
+
         emit RoundSettled(roundId, winners, r.prizePool + r.rollover);
     }
 
@@ -339,7 +389,7 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         require(r.status == RoundStatus.Open,                "round not open");
         require(block.timestamp <= r.predDeadline,           "deadline passed");
         require(!predictions[roundId][msg.sender].entered,   "already entered");
-        require(r.matchCount >= 2,                           "round not ready");
+        require(r.matchCount >= 3,                           "round not ready");
         require((teamAWinMask & drawMask) == 0,              "conflicting picks");
 
         if (r.entryFee > 0) {
@@ -368,15 +418,39 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         require(!pred.claimed,                     "already claimed");
         require(pred.winWeight > 0,                "no prize: prediction wrong");
         pred.claimed = true;
+        r.claimedCount++;
 
-        uint256 payout = ((r.prizePool + r.rollover) * pred.winWeight) / r.totalWeight;
+        uint256 basePayout = ((r.prizePool + r.rollover) * pred.winWeight) / r.totalWeight;
 
-        // Additive follower win bonus — from insurancePool, does NOT dilute other winners
-        if (followedAgent[roundId][msg.sender] && r.entryFee > 0 && insurancePool > 0) {
-            uint256 bonus = (r.entryFee * agentFollowerWinBonus) / 10_000;
-            if (bonus > insurancePool) bonus = insurancePool;
-            insurancePool -= bonus;
-            payout += bonus;
+        // Reduce global unclaimed accounting by base prize (rounding-dust guard)
+        if (totalUnclaimedPrize >= basePayout) {
+            totalUnclaimedPrize -= basePayout;
+        } else {
+            totalUnclaimedPrize = 0;
+        }
+
+        uint256 payout = basePayout;
+
+        // Agent follower win bonus — from insurancePool, does NOT dilute other winners
+        if (followedAgent[roundId][msg.sender]) {
+            // 1. Release this winner's reserved refund back to available insurance
+            uint256 myReserved = reservedRefund[roundId][msg.sender];
+            if (myReserved > 0) {
+                reservedRefund[roundId][msg.sender] = 0;
+                totalReservedRefunds -= myReserved;
+            }
+            // 2. Pay win bonus only from available insurance (never eat into reserved refunds)
+            if (r.entryFee > 0) {
+                uint256 available = insurancePool > totalReservedRefunds
+                                    ? insurancePool - totalReservedRefunds
+                                    : 0;
+                if (available > 0) {
+                    uint256 bonus = (r.entryFee * agentFollowerWinBonus) / 10_000;
+                    if (bonus > available) bonus = available;
+                    insurancePool -= bonus;
+                    payout += bonus;
+                }
+            }
         }
 
         xlwc.safeTransfer(msg.sender, payout);
@@ -412,6 +486,9 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     ///         Advantages over self-predict:
     ///           WIN  → extra +agentFollowerWinBonus% of entryFee (additive, from insurancePool)
     ///           LOSE → claimAgentRefund() refunds agentFollowerRefundBps% of entryFee
+    ///
+    ///         The refund amount is reserved from the insurance pool at entry time,
+    ///         guaranteeing it will be available at settlement regardless of subsequent activity.
     function followAndPredict(uint256 roundId) external nonReentrant {
         // ── Staking gate ──
         require(isAgentStaker(msg.sender), "stake XLWC first: need agentStakeMin to follow agent");
@@ -423,7 +500,19 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         require(r.status == RoundStatus.Open,                "round not open");
         require(block.timestamp <= r.predDeadline,           "deadline passed");
         require(!predictions[roundId][msg.sender].entered,   "already entered");
-        require(r.matchCount >= 2,                           "round not ready");
+        require(r.matchCount >= 3,                           "round not ready");
+
+        // ── Reserve refund upfront so it is guaranteed payable at settlement ──
+        if (r.entryFee > 0 && agentFollowerRefundBps > 0) {
+            uint256 projectedRefund = (r.entryFee * agentFollowerRefundBps) / 10_000;
+            // Available = insurancePool - already-reserved refunds
+            require(
+                insurancePool >= totalReservedRefunds + projectedRefund,
+                "insurance pool too low: owner must top up before more followers can join"
+            );
+            totalReservedRefunds += projectedRefund;
+            reservedRefund[roundId][msg.sender] = projectedRefund;
+        }
 
         if (r.entryFee > 0) {
             xlwc.safeTransferFrom(msg.sender, address(this), r.entryFee);
@@ -453,11 +542,16 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         UserPrediction storage pred = predictions[roundId][msg.sender];
         require(pred.entered,                                "not entered");
         require(pred.winWeight == 0,                         "you won: use claimPrize");
-        uint256 refund = (r.entryFee * agentFollowerRefundBps) / 10_000;
-        require(refund > 0,                                  "no refund (free round)");
-        require(insurancePool >= refund,                     "insurance pool depleted");
+
+        // Refund was pre-reserved at followAndPredict time — guaranteed payable
+        uint256 refund = reservedRefund[roundId][msg.sender];
+        require(refund > 0,                                  "no refund reserved (free round)");
+
         agentRefundClaimed[roundId][msg.sender] = true;
-        insurancePool -= refund;
+        reservedRefund[roundId][msg.sender] = 0;
+        totalReservedRefunds -= refund;
+        insurancePool        -= refund; // now actually deduct from gross pool
+
         xlwc.safeTransfer(msg.sender, refund);
         emit AgentRefundClaimed(roundId, msg.sender, refund);
     }
@@ -479,12 +573,36 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     // ─── Rollover & Top-up ────────────────────────────────────────────────────
 
+    /// @notice Roll unclaimed prize funds from a settled round to a target Open round.
+    ///
+    ///         Safety invariants enforced (v7):
+    ///           1. The source round must have ZERO winners, OR every winner must have
+    ///              already claimed their prize.  This prevents zeroing a live prizePool
+    ///              while outstanding claimants exist.
+    ///           2. `remaining` is computed net of all staked tokens, the full insurance
+    ///              pool (including reserved refunds), and ALL other rounds' unclaimed
+    ///              prizes — so rolling over can never steal tokens earmarked elsewhere.
     function rolloverPrize(uint256 fromRoundId, uint256 toRoundId) external onlyOwner {
         Round storage from = rounds[fromRoundId];
         Round storage to_  = rounds[toRoundId];
         require(from.status == RoundStatus.Settled, "source not settled");
         require(to_.status  == RoundStatus.Open,    "target not open");
-        uint256 remaining  = xlwc.balanceOf(address(this)) - totalAgentStaked - insurancePool;
+
+        // ── Anti-theft guard ──────────────────────────────────────────────────
+        // Block rollover while any winner of 'from' has not claimed — prevents the
+        // prizePool being zeroed while live claimants would receive 0 on next call.
+        require(
+            from.totalWinners == 0 || from.claimedCount == from.totalWinners,
+            "unclaimed prizes: all winners must claim before rollover is allowed"
+        );
+
+        // ── Safe remaining calculation ────────────────────────────────────────
+        // Exclude: stakes, insurance (gross, covers reserved refunds), and ALL
+        // other rounds' unclaimed prizes tracked by totalUnclaimedPrize.
+        uint256 balance  = xlwc.balanceOf(address(this));
+        uint256 reserved = totalAgentStaked + insurancePool + totalUnclaimedPrize;
+        uint256 remaining = balance > reserved ? balance - reserved : 0;
+
         uint256 totalPool  = from.prizePool + from.rollover;
         uint256 rollAmount = remaining < totalPool ? remaining : totalPool;
         if (rollAmount > 0) {
@@ -529,8 +647,14 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         if (!pred.entered || pred.winWeight == 0) return 0;
         uint256 payout = ((r.prizePool + r.rollover) * pred.winWeight) / r.totalWeight;
         if (followedAgent[roundId][player] && r.entryFee > 0) {
-            uint256 bonus = (r.entryFee * agentFollowerWinBonus) / 10_000;
-            if (bonus > insurancePool) bonus = insurancePool;
+            // Estimate available insurance: release own reserve (winner won't need it)
+            uint256 myReserved   = reservedRefund[roundId][player];
+            uint256 netReserved  = totalReservedRefunds > myReserved
+                                   ? totalReservedRefunds - myReserved
+                                   : 0;
+            uint256 available    = insurancePool > netReserved ? insurancePool - netReserved : 0;
+            uint256 bonus        = (r.entryFee * agentFollowerWinBonus) / 10_000;
+            if (bonus > available) bonus = available;
             payout += bonus;
         }
         return payout;
@@ -549,16 +673,14 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         return agentPicks[roundId];
     }
 
+    /// @notice Returns the refund amount the caller can claim for a given round, or 0.
     function getAgentRefund(uint256 roundId, address player) external view returns (uint256) {
-        Round storage r = rounds[roundId];
-        if (r.status != RoundStatus.Settled)            return 0;
-        if (!followedAgent[roundId][player])             return 0;
-        if (agentRefundClaimed[roundId][player])         return 0;
+        if (rounds[roundId].status != RoundStatus.Settled) return 0;
+        if (!followedAgent[roundId][player])               return 0;
+        if (agentRefundClaimed[roundId][player])           return 0;
         UserPrediction storage pred = predictions[roundId][player];
-        if (!pred.entered || pred.winWeight > 0)         return 0;
-        if (r.entryFee == 0)                             return 0;
-        uint256 refund = (r.entryFee * agentFollowerRefundBps) / 10_000;
-        return insurancePool >= refund ? refund : 0;
+        if (!pred.entered || pred.winWeight > 0)           return 0;
+        return reservedRefund[roundId][player]; // pre-reserved at entry time
     }
 
     function emergencyWithdraw() external onlyOwner {
