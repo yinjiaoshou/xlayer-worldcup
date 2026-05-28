@@ -66,7 +66,7 @@ export default function StatsBar() {
     },
     {
       label: t.statsBar.fantasyPrize,
-      value: prizePool > 0 ? `${fmt(prizePool)} XLWC` : "—",
+      value: prizePool > 0 ? `${fmt(prizePool)} XLWC` : "0 XLWC",
       sub:   players > 0 ? t.statsBar.players(players) : t.statsBar.entering,
       color: "text-purple-400",
       icon:  "🏆",

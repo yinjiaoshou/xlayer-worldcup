@@ -108,7 +108,7 @@ export default function AgentStakePanel() {
   }
 
   return (
-    <div className="relative overflow-hidden rounded-2xl border border-violet-500/35 bg-gradient-to-br from-violet-600/15 via-purple-600/8 to-transparent p-5">
+    <div id="agent-panel" className="relative overflow-hidden rounded-2xl border border-violet-500/35 bg-gradient-to-br from-violet-600/15 via-purple-600/8 to-transparent p-5">
       <div className="absolute -right-8 -top-8 w-32 h-32 rounded-full bg-violet-500/8 blur-2xl" />
       <div className="flex items-start gap-4">
 

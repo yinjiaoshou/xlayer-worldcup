@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAccount, useWriteContract, useReadContract } from "wagmi";
 import { formatEther, parseEther } from "viem";
 import { CONTRACTS, XLWC_ABI } from "../config/contracts";
@@ -191,7 +191,7 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
   const { address }            = useAccount();
   const { t, lang }            = useLang();
   const [picks, setPicks]      = useState<Record<number, number>>({});
-  const [status, setStatus]    = useState<"idle"|"approving"|"predicting"|"claiming"|"done"|"error">("idle");
+  const [status, setStatus]    = useState<"idle"|"approving"|"predicting"|"staking"|"unstaking"|"claiming"|"done"|"error">("idle");
   const [errMsg, setErrMsg]    = useState("");
   const { writeContractAsync } = useWriteContract();
 
@@ -361,12 +361,12 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
           args: [CONTRACTS.MatchPredictor, parseEther("999999999")], chainId: ACTIVE_CHAIN_ID,
         });
       }
-      setStatus("predicting");
+      setStatus("staking");
       await writeContractAsync({
         address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "stakeForAgent",
         args: [stakeAmt], chainId: ACTIVE_CHAIN_ID,
       });
-      setStatus("done");
+      setStatus("idle");
       refetchIsStaker(); refetchStakedAmount();
     } catch (e: any) {
       setStatus("error");
@@ -377,12 +377,12 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
   async function handleUnstake() {
     if (!address) return;
     try {
-      setErrMsg(""); setStatus("predicting");
+      setErrMsg(""); setStatus("unstaking");
       await writeContractAsync({
         address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "unstakeFromAgent",
         args: [], chainId: ACTIVE_CHAIN_ID,
       });
-      setStatus("done");
+      setStatus("idle");
       refetchIsStaker(); refetchStakedAmount();
     } catch (e: any) {
       setStatus("error");
@@ -488,8 +488,8 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
         )}
       </div>
 
-      {/* ── AI Agent card ─────────────────────────────────────────────────── */}
-      {agentPick?.submitted && (
+      {/* ── AI Agent card — always visible when round is open ────────────── */}
+      {(agentPick?.submitted || (isOpen && !pred?.entered)) && (
         <div className="relative overflow-hidden rounded-2xl border border-violet-500/35 bg-gradient-to-br from-violet-600/15 via-purple-600/8 to-transparent p-5">
           <div className="absolute -right-6 -top-6 w-28 h-28 rounded-full bg-violet-500/8 blur-2xl" />
 
@@ -499,6 +499,7 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
             </div>
 
             <div className="flex-1 min-w-0">
+              {/* Header */}
               <div className="flex items-center gap-2 flex-wrap mb-2">
                 <span className="font-black text-white text-base">{t.predict.agentTitle}</span>
                 <span className="text-xs bg-violet-500/20 text-violet-300 border border-violet-500/25 px-2 py-0.5 rounded-full font-semibold">
@@ -516,24 +517,36 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
                 )}
               </div>
 
-              {/* Agent's decoded picks */}
-              <div className="flex flex-wrap gap-2 mb-3">
-                {matches.map((m, i) => {
-                  const outcome = decodeAgentPick(i);
-                  if (outcome === undefined) return null;
-                  const tA = teamInfo(m.teamA); const tB = teamInfo(m.teamB);
-                  const nameA = lang === "en" ? tA.nameEn : tA.name;
-                  const nameB = lang === "en" ? tB.nameEn : tB.name;
-                  const label = outcome === RESULT_A    ? `${tA.flag} ${nameA} ${t.predict.homeWin}`
-                               : outcome === RESULT_DRAW ? t.predict.draw2
-                               :                          `${tB.flag} ${nameB} ${t.predict.awayWin}`;
-                  return (
-                    <span key={i} className="text-xs px-2.5 py-1 rounded-full border border-violet-400/30 bg-violet-500/10 text-violet-200 font-semibold">
-                      {lang === "en" ? `M${i + 1}` : `场${i + 1}`} · {label}
-                    </span>
-                  );
-                })}
-              </div>
+              {agentPick?.submitted ? (
+                /* ── Agent has picked: show picks ── */
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {matches.map((m, i) => {
+                    const outcome = decodeAgentPick(i);
+                    if (outcome === undefined) return null;
+                    const tA = teamInfo(m.teamA); const tB = teamInfo(m.teamB);
+                    const nameA = lang === "en" ? tA.nameEn : tA.name;
+                    const nameB = lang === "en" ? tB.nameEn : tB.name;
+                    const label = outcome === RESULT_A    ? `${tA.flag} ${nameA} ${t.predict.homeWin}`
+                                 : outcome === RESULT_DRAW ? t.predict.draw2
+                                 :                          `${tB.flag} ${nameB} ${t.predict.awayWin}`;
+                    return (
+                      <span key={i} className="text-xs px-2.5 py-1 rounded-full border border-violet-400/30 bg-violet-500/10 text-violet-200 font-semibold">
+                        {lang === "en" ? `M${i + 1}` : `场${i + 1}`} · {label}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : (
+                /* ── Agent hasn't picked yet ── */
+                <div className="flex items-center gap-2 bg-violet-500/8 border border-violet-500/20 rounded-xl px-3 py-2 mb-3">
+                  <span className="text-base animate-pulse">⏳</span>
+                  <span className="text-violet-300/70 text-xs font-semibold">
+                    {lang === "en"
+                      ? "AI is analyzing matches — picks will appear before deadline"
+                      : "AI 正在分析赛况，将在截止前提交竞猜"}
+                  </span>
+                </div>
+              )}
 
               {/* Win / lose bonus boxes */}
               <div className="grid grid-cols-2 gap-2 mb-3">
@@ -577,19 +590,18 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
                     )}
                     <button
                       onClick={handleStake}
-                      disabled={status === "approving" || status === "predicting" || status === "done"}
+                      disabled={status === "approving" || status === "staking"}
                       className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 font-bold text-sm hover:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {status === "approving"  ? t.predict.approving
-                       : status === "predicting" ? (lang === "en" ? "Staking…" : "质押中…")
-                       : status === "done"       ? (lang === "en" ? "✅ Staked!" : "✅ 质押成功！")
+                      {status === "approving" ? t.predict.approving
+                       : status === "staking" ? (lang === "en" ? "Staking…" : "质押中…")
                        : lang === "en"
                          ? `🔓 Stake ${stakeNeeded.toLocaleString()} XLWC to Follow AI`
                          : `🔓 质押 ${stakeNeeded.toLocaleString()} XLWC 解锁跟单`}
                     </button>
                   </div>
-                ) : (
-                  /* ── Staked: show follow button + unstake link ── */
+                ) : agentPick?.submitted ? (
+                  /* ── Staked + agent picked: show follow button ── */
                   <div className="space-y-2">
                     <div className="flex items-center gap-2 bg-emerald-500/8 border border-emerald-500/20 rounded-xl px-3 py-1.5 text-[11px]">
                       <span className="text-emerald-400">✅</span>
@@ -601,7 +613,7 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
                     </div>
                     <button
                       onClick={handleFollow}
-                      disabled={status === "approving" || status === "predicting" || status === "done" || insufficientBalance}
+                      disabled={status === "approving" || status === "predicting" || status === "staking" || status === "unstaking" || status === "done" || insufficientBalance}
                       className="w-full py-2.5 rounded-xl bg-violet-500/25 border border-violet-400/40 text-violet-200 font-bold text-sm hover:bg-violet-500/35 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       {insufficientBalance       ? t.predict.insufficientBalance(entryFee.toLocaleString())
@@ -613,11 +625,23 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
                     </button>
                     <button
                       onClick={handleUnstake}
-                      disabled={status === "approving" || status === "predicting"}
+                      disabled={status === "approving" || status === "predicting" || status === "unstaking"}
                       className="w-full py-1.5 rounded-xl bg-transparent border border-white/8 text-white/30 font-semibold text-xs hover:border-white/15 hover:text-white/50 transition-colors disabled:opacity-30"
                     >
-                      {lang === "en" ? "Unstake & exit" : "解除质押"}
+                      {status === "unstaking"
+                        ? (lang === "en" ? "Unstaking…" : "解质押中…")
+                        : (lang === "en" ? "Unstake & exit" : "解除质押")}
                     </button>
+                  </div>
+                ) : (
+                  /* ── Staked but agent hasn't picked yet ── */
+                  <div className="flex items-center gap-2 bg-emerald-500/8 border border-emerald-500/20 rounded-xl px-3 py-2 text-[11px]">
+                    <span className="text-emerald-400">✅</span>
+                    <span className="text-emerald-300 font-semibold">
+                      {lang === "en"
+                        ? `Staked · Waiting for AI picks before you can follow`
+                        : `已质押 · 等待 AI 出牌后即可一键跟单`}
+                    </span>
                   </div>
                 )
               )}
@@ -896,6 +920,16 @@ const PREVIEW_MATCHES = [
 export default function Predict() {
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
   const { t, lang } = useLang();
+
+  // 从导航 #agent-panel 链接跳转时自动滚动到面板
+  useEffect(() => {
+    if (window.location.hash === "#agent-panel") {
+      const timer = setTimeout(() => {
+        document.getElementById("agent-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, []);
 
   const { data: roundCountRaw } = useReadContract({
     address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "roundCount",
