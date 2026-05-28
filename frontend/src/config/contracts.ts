@@ -10,7 +10,7 @@ export const CONTRACTS = {
   ButterflyVault:   "0x1EcE2432F887425B267781d8DDA037269529C92B" as `0x${string}`,
   TeamTokenFactory: "0x8a3aa019bAb59C1E4f9Cd5C7d14b14098dBE422e" as `0x${string}`,
   FantasyLeague:    "0x42E7188475Aa4EBa5C32644E385F9Bca08036397" as `0x${string}`, // 梦幻阵容竞技
-  MatchPredictor:   "0x4A8C4cb4A189e36Ba92EEb7204dC495203F7dC85" as `0x${string}`, // 串关竞猜 v5 (rollover double-spend fix)
+  MatchPredictor:   "0x28CFE99d248d40009Cdc239DFDa232390d8a06D2" as `0x${string}`, // 串关竞猜 v6 (agent staking gate)
 };
 
 // ─── ABIs ─────────────────────────────────────────────────────────────────────

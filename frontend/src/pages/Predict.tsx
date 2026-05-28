@@ -65,6 +65,17 @@ const PREDICTOR_ABI = [
     inputs: [], outputs: [{ name: "", type: "uint256" }] },
   { name: "insurancePool",   type: "function", stateMutability: "view",
     inputs: [], outputs: [{ name: "", type: "uint256" }] },
+  // v6: staking gate
+  { name: "stakeForAgent",   type: "function", stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }], outputs: [] },
+  { name: "unstakeFromAgent", type: "function", stateMutability: "nonpayable",
+    inputs: [], outputs: [] },
+  { name: "isAgentStaker",   type: "function", stateMutability: "view",
+    inputs: [{ name: "player", type: "address" }], outputs: [{ name: "", type: "bool" }] },
+  { name: "agentStakes",     type: "function", stateMutability: "view",
+    inputs: [{ name: "player", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+  { name: "agentStakeMin",   type: "function", stateMutability: "view",
+    inputs: [], outputs: [{ name: "", type: "uint256" }] },
 ] as const;
 
 // Outcome constants
@@ -241,6 +252,21 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
     args: address ? [address] : undefined,
     chainId: ACTIVE_CHAIN_ID, query: { enabled: !!address, refetchInterval: 30_000 },
   });
+  // v6: staking state
+  const { data: isStakerRaw, refetch: refetchIsStaker } = useReadContract({
+    address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "isAgentStaker",
+    args: address ? [address] : undefined,
+    chainId: ACTIVE_CHAIN_ID, query: { enabled: !!address },
+  });
+  const { data: stakedAmountRaw, refetch: refetchStakedAmount } = useReadContract({
+    address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "agentStakes",
+    args: address ? [address] : undefined,
+    chainId: ACTIVE_CHAIN_ID, query: { enabled: !!address },
+  });
+  const { data: stakeMinRaw } = useReadContract({
+    address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "agentStakeMin",
+    chainId: ACTIVE_CHAIN_ID,
+  });
 
   const round    = roundRaw  as RoundData   | undefined;
   const matches  = (matchesRaw as MatchData[] | undefined) ?? [];
@@ -293,6 +319,13 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
   const xlwcBalance        = xlwcBalanceRaw as bigint | undefined;
   const insufficientBalance = round.entryFee > 0n && !!xlwcBalance && xlwcBalance < round.entryFee;
 
+  // v6 staking
+  const isStaker       = !!(isStakerRaw as boolean | undefined);
+  const stakedAmount   = stakedAmountRaw ? Number(formatEther(stakedAmountRaw as bigint)) : 0;
+  const stakeMin       = stakeMinRaw     ? Number(formatEther(stakeMinRaw     as bigint)) : 500;
+  const stakeNeeded    = Math.max(0, stakeMin - stakedAmount);
+  const needStakeApproval = stakeNeeded > 0 && (allowanceRaw as bigint ?? 0n) < parseEther(String(stakeNeeded));
+
   async function handlePredict() {
     if (!address || !allPicked) return;
     try {
@@ -310,6 +343,46 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
         args: [BigInt(roundId), aWinMask, drawMask], chainId: ACTIVE_CHAIN_ID,
       });
       setStatus("done"); refetchPred();
+    } catch (e: any) {
+      setStatus("error");
+      setErrMsg(e?.shortMessage ?? e?.message ?? t.predict.txFailed);
+    }
+  }
+
+  async function handleStake() {
+    if (!address || stakeNeeded <= 0) return;
+    try {
+      setErrMsg(""); setStatus("approving");
+      const stakeAmt = parseEther(String(stakeNeeded));
+      if (needStakeApproval) {
+        await writeContractAsync({
+          address: CONTRACTS.XLWCFlap, abi: XLWC_ABI, functionName: "approve",
+          args: [CONTRACTS.MatchPredictor, parseEther("999999999")], chainId: ACTIVE_CHAIN_ID,
+        });
+      }
+      setStatus("predicting");
+      await writeContractAsync({
+        address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "stakeForAgent",
+        args: [stakeAmt], chainId: ACTIVE_CHAIN_ID,
+      });
+      setStatus("done");
+      refetchIsStaker(); refetchStakedAmount();
+    } catch (e: any) {
+      setStatus("error");
+      setErrMsg(e?.shortMessage ?? e?.message ?? t.predict.txFailed);
+    }
+  }
+
+  async function handleUnstake() {
+    if (!address) return;
+    try {
+      setErrMsg(""); setStatus("predicting");
+      await writeContractAsync({
+        address: CONTRACTS.MatchPredictor, abi: PREDICTOR_ABI, functionName: "unstakeFromAgent",
+        args: [], chainId: ACTIVE_CHAIN_ID,
+      });
+      setStatus("done");
+      refetchIsStaker(); refetchStakedAmount();
     } catch (e: any) {
       setStatus("error");
       setErrMsg(e?.shortMessage ?? e?.message ?? t.predict.txFailed);
@@ -479,23 +552,72 @@ function RoundDetail({ roundId, onBack }: { roundId: number; onBack: () => void 
                 </div>
               </div>
 
-              {/* One-click follow */}
+              {/* One-click follow — staking gate */}
               {isOpen && !pred?.entered && (
                 !address ? (
                   <div className="text-violet-400/60 text-xs">{t.predict.followConnectPrompt}</div>
+                ) : !isStaker ? (
+                  /* ── Not staked yet: show stake CTA ── */
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-500/25 rounded-xl px-3 py-2.5 text-xs">
+                      <span className="text-amber-400">🔒</span>
+                      <span className="text-amber-200 font-semibold">
+                        {lang === "en"
+                          ? `Stake ${stakeMin.toLocaleString()} XLWC to unlock AI follow`
+                          : `需质押 ${stakeMin.toLocaleString()} XLWC 才能一键跟单`}
+                      </span>
+                    </div>
+                    {stakedAmount > 0 && (
+                      <div className="text-white/35 text-[11px] text-center">
+                        {lang === "en"
+                          ? `Already staked: ${stakedAmount.toLocaleString()} XLWC · need ${stakeNeeded.toLocaleString()} more`
+                          : `已质押 ${stakedAmount.toLocaleString()} XLWC · 还差 ${stakeNeeded.toLocaleString()} XLWC`}
+                      </div>
+                    )}
+                    <button
+                      onClick={handleStake}
+                      disabled={status === "approving" || status === "predicting" || status === "done"}
+                      className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 font-bold text-sm hover:bg-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {status === "approving"  ? t.predict.approving
+                       : status === "predicting" ? (lang === "en" ? "Staking…" : "质押中…")
+                       : status === "done"       ? (lang === "en" ? "✅ Staked!" : "✅ 质押成功！")
+                       : lang === "en"
+                         ? `🔓 Stake ${stakeNeeded.toLocaleString()} XLWC to Follow AI`
+                         : `🔓 质押 ${stakeNeeded.toLocaleString()} XLWC 解锁跟单`}
+                    </button>
+                  </div>
                 ) : (
-                  <button
-                    onClick={handleFollow}
-                    disabled={status === "approving" || status === "predicting" || status === "done" || insufficientBalance}
-                    className="w-full py-2.5 rounded-xl bg-violet-500/25 border border-violet-400/40 text-violet-200 font-bold text-sm hover:bg-violet-500/35 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {insufficientBalance       ? t.predict.insufficientBalance(entryFee.toLocaleString())
-                     : status === "approving"  ? t.predict.approving
-                     : status === "predicting" ? (lang === "en" ? "Following…" : "跟单中…")
-                     : status === "done"       ? t.predict.followDone
-                     : entryFee > 0            ? t.predict.followBtn(entryFee.toLocaleString())
-                     : t.predict.followFree}
-                  </button>
+                  /* ── Staked: show follow button + unstake link ── */
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2 bg-emerald-500/8 border border-emerald-500/20 rounded-xl px-3 py-1.5 text-[11px]">
+                      <span className="text-emerald-400">✅</span>
+                      <span className="text-emerald-300 font-semibold">
+                        {lang === "en"
+                          ? `Staked ${stakedAmount.toLocaleString()} XLWC — AI follow unlocked`
+                          : `已质押 ${stakedAmount.toLocaleString()} XLWC — 跟单权限已解锁`}
+                      </span>
+                    </div>
+                    <button
+                      onClick={handleFollow}
+                      disabled={status === "approving" || status === "predicting" || status === "done" || insufficientBalance}
+                      className="w-full py-2.5 rounded-xl bg-violet-500/25 border border-violet-400/40 text-violet-200 font-bold text-sm hover:bg-violet-500/35 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {insufficientBalance       ? t.predict.insufficientBalance(entryFee.toLocaleString())
+                       : status === "approving"  ? t.predict.approving
+                       : status === "predicting" ? (lang === "en" ? "Following…" : "跟单中…")
+                       : status === "done"       ? t.predict.followDone
+                       : entryFee > 0            ? t.predict.followBtn(entryFee.toLocaleString())
+                       : t.predict.followFree}
+                    </button>
+                    <button
+                      onClick={handleUnstake}
+                      disabled={status === "approving" || status === "predicting"}
+                      className="w-full py-1.5 rounded-xl bg-transparent border border-white/8 text-white/30 font-semibold text-xs hover:border-white/15 hover:text-white/50 transition-colors disabled:opacity-30"
+                    >
+                      {lang === "en" ? "Unstake & exit" : "解除质押"}
+                    </button>
+                  </div>
                 )
               )}
             </div>

@@ -6,11 +6,10 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-/// @title  MatchPredictor — 串关竞猜 (Accumulator Prediction)
+/// @title  MatchPredictor — 串关竞猜 v6 (Agent Staking)
 /// @notice Each "round" bundles 3-5 World Cup matches.
 ///         Players pay XLWC and predict ALL match outcomes in the round.
-///         Supports 3 outcomes per match: teamA wins / draw / teamB wins
-///         (required for group-stage matches which can end in a draw).
+///         Supports 3 outcomes per match: teamA wins / draw / teamB wins.
 ///
 ///         Prediction encoding (two uint8 bitmasks):
 ///           bit i in teamAWinMask → predict teamA wins match i
@@ -19,8 +18,13 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 ///           (both bits set is invalid)
 ///
 ///         Bonus system:
-///           爆冷加成 (Underdog bonus ×2):  correct underdog pick on any match
+///           爆冷加成 (Underdog boost ×2):  correct underdog pick on any match
 ///           持币加成 (Holder bonus +50%):  hold ≥ holderThreshold of a winning team token
+///
+///         Agent staking:
+///           质押门槛 (Stake gate):  stake ≥ agentStakeMin XLWC once → access followAndPredict
+///           跟单赢   (Follow win):  additive +winBonus% of entryFee from insurancePool
+///           跟单输   (Follow lose): partial refund refundBps% of entryFee from insurancePool
 contract MatchPredictor is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -37,7 +41,7 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     struct MatchInfo {
         string  teamA;        // ISO-3 country code, e.g. "BRA"
-        string  teamB;        // ISO-3 country code, e.g. "ARG"
+        string  teamB;
         address teamAToken;   // team token address (for holder bonus)
         address teamBToken;
         bool    favoriteIsA;  // true = teamA is the favorite
@@ -79,20 +83,34 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     uint256 public holderThreshold = 100 ether;
 
     // ─── Agent mechanic ───────────────────────────────────────────────────────
-    //  DESIGN: bonus is ADDITIVE (paid from insurance pool at claim time),
-    //          NOT weight-based.  Reason: weight bonuses dilute independent
-    //          winners when many followers join the same round.
+    //
+    //  STAKING GATE: Users must stake ≥ agentStakeMin XLWC to access followAndPredict.
+    //  Staking is persistent (stake once → follow any round while staked).
+    //  Users may unstake at any time.
+    //
+    //  BONUS DESIGN: additive cash from insurancePool — NOT weight-based.
+    //  Reason: weight bonuses dilute independent winners when many followers join.
     //
     //  Actuarial basis (agent accuracy p=40%, follower ratio k/N=60%):
     //    Expected drain per follower per round = p*B + (1-p)*R
     //                                          = 0.4*0.30 + 0.6*0.15 = 0.21
-    //    Expected drain / prize pool            = 0.6 * 0.21 = ~13%  ← sustainable
-    //    Follower EV advantage vs self-pick     = p*B + (1-p)*R = +21% of entryFee
-    //
-    /// Additive win bonus for followers: 30% of entryFee from insurancePool (= 3000/10000)
-    uint256 public agentFollowerWinBonus  = 3_000;
-    /// Entry-fee refund for followers who LOSE: 15% back (= 1500/10000)
-    uint256 public agentFollowerRefundBps = 1_500;
+    //    Follower EV advantage vs self-pick     = +21% of entryFee  ← sustainable
+
+    /// Minimum XLWC to stake for agent-follow access (default 500 XLWC)
+    uint256 public agentStakeMin = 500 ether;
+
+    /// Per-user staked XLWC amounts
+    mapping(address => uint256) public agentStakes;
+
+    /// Total XLWC currently staked across all users
+    uint256 public totalAgentStaked;
+
+    /// Additive win bonus for followers: 30% of entryFee from insurancePool
+    uint256 public agentFollowerWinBonus  = 3_000; // bps, 3000/10000 = 30%
+
+    /// Entry-fee refund for followers who LOSE: 15% back
+    uint256 public agentFollowerRefundBps = 1_500; // bps, 1500/10000 = 15%
+
     /// XLWC insurance pool (funded by owner via addInsurance)
     uint256 public insurancePool;
 
@@ -103,9 +121,9 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     mapping(uint256 => address[])                            private _roundParticipants;
 
     // Agent-prediction state
-    mapping(uint256 => AgentPick)                            public agentPicks;          // roundId → agent pick
-    mapping(uint256 => mapping(address => bool))             public followedAgent;        // roundId → user → followed?
-    mapping(uint256 => mapping(address => bool))             public agentRefundClaimed;   // roundId → user → refund taken?
+    mapping(uint256 => AgentPick)                            public agentPicks;
+    mapping(uint256 => mapping(address => bool))             public followedAgent;
+    mapping(uint256 => mapping(address => bool))             public agentRefundClaimed;
 
     // ─── Events ───────────────────────────────────────────────────────────────
 
@@ -116,17 +134,65 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
     event RoundSettled(uint256 indexed roundId, uint256 winners, uint256 prizePool);
     event PrizeClaimed(uint256 indexed roundId, address indexed player, uint256 amount);
     event RolloverAdded(uint256 indexed roundId, uint256 amount);
-    // Agent mechanic events
+    // Agent events
     event AgentPickSubmitted(uint256 indexed roundId, uint8 teamAWinMask, uint8 drawMask);
     event AgentFollowed(uint256 indexed roundId, address indexed player);
     event AgentRefundClaimed(uint256 indexed roundId, address indexed player, uint256 amount);
     event InsuranceAdded(uint256 amount);
+    // Staking events
+    event AgentStaked(address indexed player, uint256 amount, uint256 total);
+    event AgentUnstaked(address indexed player, uint256 amount, uint256 total);
+    event AgentStakeMinUpdated(uint256 newMin);
 
     // ─── Constructor ─────────────────────────────────────────────────────────
 
     constructor(address _xlwc) Ownable(msg.sender) {
         require(_xlwc != address(0), "zero xlwc");
         xlwc = IERC20(_xlwc);
+    }
+
+    // ─── Agent: Staking gate ──────────────────────────────────────────────────
+
+    /// @notice Stake XLWC to unlock agent-follow privilege.
+    ///         Must stake at least agentStakeMin total to access followAndPredict.
+    ///         Staking is additive — call multiple times if desired.
+    function stakeForAgent(uint256 amount) external nonReentrant {
+        require(amount > 0, "zero amount");
+        xlwc.safeTransferFrom(msg.sender, address(this), amount);
+        agentStakes[msg.sender] += amount;
+        totalAgentStaked        += amount;
+        emit AgentStaked(msg.sender, amount, agentStakes[msg.sender]);
+    }
+
+    /// @notice Unstake all XLWC. Loses agent-follow access if balance drops below min.
+    function unstakeFromAgent() external nonReentrant {
+        uint256 amount = agentStakes[msg.sender];
+        require(amount > 0, "nothing staked");
+        agentStakes[msg.sender] = 0;
+        totalAgentStaked       -= amount;
+        xlwc.safeTransfer(msg.sender, amount);
+        emit AgentUnstaked(msg.sender, amount, 0);
+    }
+
+    /// @notice Partial unstake — keeps access if remaining ≥ agentStakeMin.
+    function unstakePartial(uint256 amount) external nonReentrant {
+        require(amount > 0, "zero amount");
+        require(agentStakes[msg.sender] >= amount, "insufficient stake");
+        agentStakes[msg.sender] -= amount;
+        totalAgentStaked        -= amount;
+        xlwc.safeTransfer(msg.sender, amount);
+        emit AgentUnstaked(msg.sender, amount, agentStakes[msg.sender]);
+    }
+
+    /// @notice Returns true if the player has staked enough for agent access.
+    function isAgentStaker(address player) public view returns (bool) {
+        return agentStakes[player] >= agentStakeMin;
+    }
+
+    /// @notice Admin: update the minimum stake required.
+    function setAgentStakeMin(uint256 _min) external onlyOwner {
+        agentStakeMin = _min;
+        emit AgentStakeMinUpdated(_min);
     }
 
     // ─── Admin: Round Setup ───────────────────────────────────────────────────
@@ -176,7 +242,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         emit RoundLocked(roundId);
     }
 
-    /// @notice Settle one match. result: 0=teamA wins, 1=draw, 2=teamB wins
     function settleMatch(uint256 roundId, uint8 matchIndex, uint8 result) external onlyOwner {
         require(result <= RESULT_B,                  "invalid result (0/1/2)");
         Round storage r = rounds[roundId];
@@ -187,7 +252,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         m.result  = result;
         emit MatchSettled(roundId, matchIndex, result);
 
-        // Auto-finalize when all matches are settled
         bool allDone = true;
         for (uint8 i; i < r.matchCount; i++) {
             if (!roundMatches[roundId][i].settled) { allDone = false; break; }
@@ -211,7 +275,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
             UserPrediction storage pred = predictions[roundId][player];
             if (pred.claimed) continue;
 
-            // Check all predictions correct
             bool allCorrect = true;
             for (uint8 i; i < r.matchCount; i++) {
                 uint8 predicted = _decodePrediction(pred, i);
@@ -222,10 +285,10 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
             // Base weight = 10000 (= 1.0×)
             uint256 weight = 10_000;
 
-            // 爆冷加成: any correct underdog pick (not draw) → ×2
+            // 爆冷加成: any correct underdog pick → ×2
             for (uint8 i; i < r.matchCount; i++) {
                 uint8 predicted = _decodePrediction(pred, i);
-                if (predicted == RESULT_DRAW) continue; // draws don't trigger underdog bonus
+                if (predicted == RESULT_DRAW) continue;
                 bool pickedUnderdog = (predicted == RESULT_A && !matches[i].favoriteIsA) ||
                                      (predicted == RESULT_B &&  matches[i].favoriteIsA);
                 if (pickedUnderdog) { weight = weight * 2; break; }
@@ -235,9 +298,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
             if (_holdsWinningTeam(player, roundId)) {
                 weight = weight * 15_000 / 10_000;
             }
-
-            // NOTE: agent follower win bonus is additive cash (paid at claimPrize),
-            //       NOT a weight multiplier — avoids diluting independent winners.
 
             pred.winWeight = weight;
             totalWeight   += weight;
@@ -249,7 +309,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         emit RoundSettled(roundId, winners, r.prizePool + r.rollover);
     }
 
-    /// Decode the predicted outcome for match i from the bitmasks.
     function _decodePrediction(UserPrediction storage pred, uint8 i)
         internal view returns (uint8)
     {
@@ -258,8 +317,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         return RESULT_B;
     }
 
-    /// Check if a player holds ≥ holderThreshold of any winning team token.
-    /// Draws produce no winner, so skip them.
     function _holdsWinningTeam(address player, uint256 roundId) internal view returns (bool) {
         MatchInfo[] storage matches = roundMatches[roundId];
         for (uint8 i; i < matches.length; i++) {
@@ -274,9 +331,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     // ─── Predict ──────────────────────────────────────────────────────────────
 
-    /// @param teamAWinMask bitmask: bit i = 1 → predict teamA wins match i
-    /// @param drawMask     bitmask: bit i = 1 → predict draw for match i
-    ///                     If both bits 0 for match i → teamB wins predicted.
     function predict(uint256 roundId, uint8 teamAWinMask, uint8 drawMask)
         external nonReentrant
     {
@@ -315,13 +369,12 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         require(pred.winWeight > 0,                "no prize: prediction wrong");
         pred.claimed = true;
 
-        // Base payout from prize pool (proportional weight)
         uint256 payout = ((r.prizePool + r.rollover) * pred.winWeight) / r.totalWeight;
 
-        // Additive follower win bonus — paid from insurancePool, does NOT dilute other winners
+        // Additive follower win bonus — from insurancePool, does NOT dilute other winners
         if (followedAgent[roundId][msg.sender] && r.entryFee > 0 && insurancePool > 0) {
             uint256 bonus = (r.entryFee * agentFollowerWinBonus) / 10_000;
-            if (bonus > insurancePool) bonus = insurancePool; // cap at available
+            if (bonus > insurancePool) bonus = insurancePool;
             insurancePool -= bonus;
             payout += bonus;
         }
@@ -332,8 +385,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     // ─── Agent: Submit pick ───────────────────────────────────────────────────
 
-    /// @notice Owner (AI Agent) publishes its official prediction for a round.
-    ///         Must be called before the prediction deadline and before lockRound.
     function submitAgentPick(
         uint256 roundId,
         uint8   teamAWinMask,
@@ -353,13 +404,18 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         emit AgentPickSubmitted(roundId, teamAWinMask, drawMask);
     }
 
-    // ─── Agent: Follow (one-click copy) ───────────────────────────────────────
+    // ─── Agent: Follow (one-click, requires staking) ──────────────────────────
 
-    /// @notice Copy the agent's picks with one call.
+    /// @notice Copy the agent's picks with one click.
+    ///         REQUIRES: caller must have staked ≥ agentStakeMin XLWC (see stakeForAgent).
+    ///
     ///         Advantages over self-predict:
-    ///           WIN  → weight × (1 + agentFollowerWinBonus / 10000)  (+50%)
-    ///           LOSE → claimAgentRefund() returns agentFollowerRefundBps of entryFee (50% back)
+    ///           WIN  → extra +agentFollowerWinBonus% of entryFee (additive, from insurancePool)
+    ///           LOSE → claimAgentRefund() refunds agentFollowerRefundBps% of entryFee
     function followAndPredict(uint256 roundId) external nonReentrant {
+        // ── Staking gate ──
+        require(isAgentStaker(msg.sender), "stake XLWC first: need agentStakeMin to follow agent");
+
         AgentPick storage ap = agentPicks[roundId];
         require(ap.submitted,                                "agent has not predicted yet");
         Round storage r = rounds[roundId];
@@ -389,8 +445,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     // ─── Agent: Refund for followers who lost ─────────────────────────────────
 
-    /// @notice A follower who lost (winWeight == 0) claims a partial entry-fee refund
-    ///         from the insurance pool.  Requires the owner to fund insurancePool first.
     function claimAgentRefund(uint256 roundId) external nonReentrant {
         Round storage r = rounds[roundId];
         require(r.status == RoundStatus.Settled,             "not settled");
@@ -410,17 +464,15 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     // ─── Agent: Insurance pool top-up ─────────────────────────────────────────
 
-    /// @notice Owner deposits XLWC into the insurance pool used for follower refunds.
     function addInsurance(uint256 amount) external onlyOwner {
         xlwc.safeTransferFrom(msg.sender, address(this), amount);
         insurancePool += amount;
         emit InsuranceAdded(amount);
     }
 
-    /// @notice Update the win-bonus and refund-bps parameters.
     function setAgentBonusParams(uint256 winBonus, uint256 refundBps) external onlyOwner {
-        require(winBonus  <= 20_000, "winBonus too high");   // max +200%
-        require(refundBps <= 10_000, "refundBps too high");  // max 100%
+        require(winBonus  <= 20_000, "winBonus too high");
+        require(refundBps <= 10_000, "refundBps too high");
         agentFollowerWinBonus  = winBonus;
         agentFollowerRefundBps = refundBps;
     }
@@ -432,13 +484,13 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         Round storage to_  = rounds[toRoundId];
         require(from.status == RoundStatus.Settled, "source not settled");
         require(to_.status  == RoundStatus.Open,    "target not open");
-        uint256 remaining  = xlwc.balanceOf(address(this));
+        uint256 remaining  = xlwc.balanceOf(address(this)) - totalAgentStaked - insurancePool;
         uint256 totalPool  = from.prizePool + from.rollover;
         uint256 rollAmount = remaining < totalPool ? remaining : totalPool;
         if (rollAmount > 0) {
             to_.rollover  += rollAmount;
             from.prizePool = 0;
-            from.rollover  = 0; // prevent double-rollover
+            from.rollover  = 0;
             emit RolloverAdded(toRoundId, rollAmount);
         }
     }
@@ -476,7 +528,6 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         UserPrediction storage pred = predictions[roundId][player];
         if (!pred.entered || pred.winWeight == 0) return 0;
         uint256 payout = ((r.prizePool + r.rollover) * pred.winWeight) / r.totalWeight;
-        // Add follower win bonus preview (capped at current insurance pool)
         if (followedAgent[roundId][player] && r.entryFee > 0) {
             uint256 bonus = (r.entryFee * agentFollowerWinBonus) / 10_000;
             if (bonus > insurancePool) bonus = insurancePool;
@@ -494,13 +545,10 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
         holderThreshold = _threshold;
     }
 
-    /// @notice Returns the agent's stored pick for a round (read before following).
     function getAgentPick(uint256 roundId) external view returns (AgentPick memory) {
         return agentPicks[roundId];
     }
 
-    /// @notice How much XLWC a losing follower can claim as refund.
-    ///         Returns 0 if not eligible or already claimed.
     function getAgentRefund(uint256 roundId, address player) external view returns (uint256) {
         Round storage r = rounds[roundId];
         if (r.status != RoundStatus.Settled)            return 0;
@@ -515,6 +563,7 @@ contract MatchPredictor is Ownable, ReentrancyGuard {
 
     function emergencyWithdraw() external onlyOwner {
         uint256 bal = xlwc.balanceOf(address(this));
+        // NOTE: returns everything including staked amounts — use only in extreme emergency
         if (bal > 0) xlwc.safeTransfer(owner(), bal);
     }
 }
